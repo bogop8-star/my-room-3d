@@ -170,7 +170,7 @@ async function loadSplat() {
   } catch (e) { /* HEAD가 안 되면 그냥 넘어갑니다 */ }
 
   try {
-    splatMesh = new SplatMesh({ url: FILE_NAME, fileType: format });
+    splatMesh = new SplatMesh({ url: FILE_NAME });
     scene.add(splatMesh);
     await splatMesh.initialized;
     const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
