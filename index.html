@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>3D Gaussian Splat Viewer</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #111; overflow: hidden; }
+  #canvas-container { width: 100%; height: 100%; position: relative; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #status {
+    position: absolute; top: 10px; left: 10px; color: #eee; background: rgba(0,0,0,0.6);
+    font-family: monospace; font-size: 12px; padding: 10px 14px; border-radius: 6px;
+    line-height: 1.6; z-index: 10; max-width: 320px;
+  }
+  #status .ok { color: #6f6; }
+  #status .pending { color: #999; }
+  #status .err { color: #f66; }
+  #flip-btn {
+    position: absolute; bottom: 14px; right: 14px; z-index: 10;
+    background: rgba(0,0,0,0.6); color: #eee; border: 1px solid #555; border-radius: 6px;
+    padding: 8px 12px; font-family: monospace; font-size: 12px; cursor: pointer;
+  }
+  #flip-btn:hover { background: rgba(0,0,0,0.85); }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/",
+    "@sparkjsdev/spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@0.1.7/dist/spark.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="canvas-container">
+  <div id="status">불러오는 중...</div>
+  <button id="flip-btn" title="위아래가 뒤집혀 보이면 눌러주세요">위아래 뒤집기</button>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+
+// ── 여기 한 줄만 바꾸면 다른 파일을 띄울 수 있습니다 ──
+const FILE_NAME = "scene.sog";
+// ────────────────────────────────────────────
+
+const statusEl = document.getElementById("status");
+const steps = [
+  { key: "lib", label: "라이브러리 불러오기" },
+  { key: "renderer", label: "렌더러 넣기" },
+  { key: "fetch", label: "파일 받기" },
+  { key: "decode", label: "알갱이로 풀기" },
+  { key: "frame", label: "크기 재기" },
+];
+const stepState = {};
+steps.forEach(s => stepState[s.key] = "pending");
+
+function renderStatus(extra) {
+  const lines = steps.map(s => {
+    const st = stepState[s.key];
+    const mark = st === "ok" ? "✓" : st === "err" ? "✗" : "…";
+    const cls = st === "ok" ? "ok" : st === "err" ? "err" : "pending";
+    return `<span class="${cls}">${mark} ${s.label}</span>`;
+  });
+  statusEl.innerHTML = lines.join("<br>") + (extra ? `<br><br>${extra}` : "");
+}
+function setStep(key, ok, note) {
+  stepState[key] = ok ? "ok" : "err";
+  renderStatus(note);
+}
+renderStatus();
+
+// 확장자 -> Spark가 아는 형식 이름으로 옮기는 대응표
+const EXT_TO_FORMAT = {
+  ply: "ply",
+  splat: "splat",
+  ksplat: "ksplat",
+  spz: "spz",
+  sog: "pcsogszip",
+};
+
+function getExt(name) {
+  return name.split(".").pop().toLowerCase();
+}
+
+let scene, camera, renderer, controls, sparkRenderer, splatMesh;
+let upFlipped = false;
+
+function init3D() {
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 1000);
+  camera.position.set(0, 0, 3);
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.getElementById("canvas-container").appendChild(renderer.domElement);
+
+  // Spark 전용 렌더러를 장면에 넣습니다. 이 한 줄이 없으면 화면이 검게 남습니다.
+  sparkRenderer = new SparkRenderer({ renderer });
+  scene.add(sparkRenderer);
+
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+
+  window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  setStep("renderer", true);
+  animate();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+function frameCameraToSplat(mesh) {
+  // three.js의 기본 바깥상자 계산은 스플랫 덩어리에 대해 빈 상자를 돌려줍니다.
+  // Spark가 주는 자로 다시 재서 카메라를 그 앞에 놓습니다.
+  try {
+    let center = new THREE.Vector3();
+    let radius = 1;
+    if (typeof mesh.getBoundingSphere === "function") {
+      const sphere = mesh.getBoundingSphere();
+      if (sphere) { center = sphere.center.clone(); radius = sphere.radius || 1; }
+    } else if (mesh.packedSplats && mesh.packedSplats.boundingBox) {
+      const bb = mesh.packedSplats.boundingBox;
+      bb.getCenter(center);
+      radius = bb.getSize(new THREE.Vector3()).length() / 2 || 1;
+    }
+    controls.target.copy(center);
+    camera.position.copy(center).add(new THREE.Vector3(0, 0, radius * 2.2 + 0.5));
+    camera.near = Math.max(radius * 0.01, 0.001);
+    camera.far = radius * 50 + 10;
+    camera.updateProjectionMatrix();
+    controls.update();
+    setStep("frame", true);
+  } catch (e) {
+    console.warn("bounding info fetch failed, using default camera", e);
+    setStep("frame", false, "기본 위치로 카메라를 놓았습니다 (크기 정보를 못 읽음)");
+  }
+}
+
+async function loadSplat() {
+  setStep("lib", true);
+  init3D();
+
+  const ext = getExt(FILE_NAME);
+  const format = EXT_TO_FORMAT[ext];
+  if (!format) {
+    setStep("fetch", false, `알 수 없는 확장자: ${ext}`);
+    return;
+  }
+
+  const t0 = performance.now();
+  let fileSize = null;
+  try {
+    const head = await fetch(FILE_NAME, { method: "HEAD" });
+    const len = head.headers.get("content-length");
+    if (len) fileSize = parseInt(len, 10);
+  } catch (e) { /* HEAD가 안 되면 그냥 넘어갑니다 */ }
+
+  try {
+    splatMesh = new SplatMesh({ url: FILE_NAME, fileType: format });
+    scene.add(splatMesh);
+    await splatMesh.initialized;
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+    setStep("fetch", true);
+    setStep("decode", true);
+
+    const count = splatMesh.numSplats ?? splatMesh.packedSplats?.numSplats ?? "?";
+    const sizeStr = fileSize ? `${(fileSize / 1e6).toFixed(1)}MB` : "알 수 없음";
+    renderStatus(
+      `파일: ${FILE_NAME}<br>크기: ${sizeStr}<br>받는 시간: ${elapsed}초<br>알갱이 개수: ${count}`
+    );
+
+    frameCameraToSplat(splatMesh);
+  } catch (err) {
+    console.error(err);
+    setStep("fetch", false, `오류: ${err.message}. 콘솔을 확인하세요.`);
+  }
+}
+
+document.getElementById("flip-btn").addEventListener("click", () => {
+  if (!splatMesh) return;
+  upFlipped = !upFlipped;
+  splatMesh.rotation.z = upFlipped ? Math.PI : 0;
+});
+
+loadSplat();
+</script>
+</body>
+</html>
